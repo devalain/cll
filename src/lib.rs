@@ -27,6 +27,7 @@
 extern crate alloc;
 
 mod head;
+mod invariants;
 mod sort;
 
 pub use head::cursor::{Cursor, CursorMut, DoubleCursor};
@@ -68,13 +69,14 @@ macro_rules! list {
 
 /// A circular doubly linked list.
 pub struct CircularList<T> {
-    // The `head` field is a pointer to a `ListHead<T>`. The code try to preserve the following
-    // invariant (1): If the list is empty, it is null, otherwise it is a valid pointer that one
-    // can safely dereference.
+    /// The `head` field is a pointer to a `ListHead<T>`. The code try to preserve the following
+    /// invariant (1): If the list is empty, it is null, otherwise it is a valid pointer that one
+    /// can safely dereference. (See also [`INVARIANT_1`](`crate::invariants::INVARIANT_1`))
     head: *const ListHead<T>,
 
-    // Obviously the number of elements in the list.
-    // Invariant (2): It is updated each time an element is added to the list or removed from it.
+    /// Obviously the number of elements in the list.
+    /// Invariant (2): It is updated each time an element is added to the list or removed from it.
+    /// (See also [`INVARIANT_1`](`crate::invariants::INVARIANT_2`))
     length: usize,
 }
 
@@ -87,9 +89,14 @@ impl<T> CircularList<T> {
     /// The caller must assert that `element` is a valid pointer to a `ListHead` that is a
     /// member of `self`.
     pub(crate) unsafe fn insert_after(&mut self, val: T, element: *mut ListHead<T>) {
-        let new = Box::leak(ListHead::<T>::new(val));
+        let new = Box::into_raw(ListHead::<T>::new(val));
 
-        (*element).add_after(new);
+        unsafe {
+            // SAFETY: The caller promises us that `element` is valid and
+            // belongs to `self`. The `new` pointer is obviously valid
+            // since it was returned form `Box::into_raw`.
+            (*element).add_after(new);
+        }
 
         // Preserving invariant (2)
         self.length += 1;
@@ -117,18 +124,20 @@ impl<T> CircularList<T> {
     /// assert_eq!(my_list.pop(), Some("Hello"))
     ///
     pub fn add(&mut self, val: T) {
-        let new = Box::leak(ListHead::<T>::new(val));
+        let new = Box::into_raw(ListHead::<T>::new(val));
 
-        // If `self.head` is null (which means `self.length == 0` by (2)) then it is assigned to
-        // a valid pointer to the `new` element, preserving (1).
+        // If `self.head` is null (which means `self.length == 0` by (2)) then
+        // it is assigned to a valid pointer to the `new` element,
+        // preserving (1).
         if self.head.is_null() {
             debug_assert_eq!(self.length, 0);
             self.head = new;
         } else {
             let head = self.head as *mut ListHead<T>;
             unsafe {
-                // SAFETY: At this point, `head` must be valid since it was initialized to `new`
-                // if it was null.
+                // SAFETY: At this point, `head` must be valid since it was
+                // initialized to `new` if it was null. The `new` pointer is
+                // obviously valid since it was returned form `Box::into_raw`.
                 (*head).add(new);
             }
         }
@@ -145,8 +154,8 @@ impl<T> CircularList<T> {
             panic!("Cannot peek when list is empty");
         }
         unsafe {
-            // SAFETY: Invariant (1) guarantee the pointer head to be valid when the list is not
-            // empty.
+            // SAFETY: Invariant (1) guarantee the pointer head to be valid
+            // when the list is not empty.
             (*self.head).value()
         }
     }
@@ -214,7 +223,7 @@ impl<T> CircularList<T> {
         let i = i % self.length;
         let j = j % self.length;
 
-        // Don't swap an element with itself.
+        // Swaping an element with itself is a no-op.
         if i == j {
             return;
         }
