@@ -46,7 +46,7 @@ impl<'life, T> Cursor<'life, T> {
         unsafe {
             // SAFETY: Invariants (3) and (4) assert that `self.current` is a valid pointer to
             // a valid circular linked list
-            self.current = (*self.current).next;
+            self.current = (*self.current).next_ptr();
         }
     }
 
@@ -55,7 +55,7 @@ impl<'life, T> Cursor<'life, T> {
         unsafe {
             // SAFETY: Invariants (3) and (4) assert that `self.current` is a valid pointer to
             // a valid circular linked list
-            self.current = (*self.current).prev;
+            self.current = (*self.current).prev_ptr();
         }
     }
 
@@ -87,11 +87,11 @@ pub struct DoubleCursor<'life, T> {
     // * `a` and `b` are always valid pointers
     // * The `idx_a` and `idx_b` are always equal to the number of (forward) steps between the
     // head and the position of `a` and `b` respectively
-    a: *const ListHead<T>,
-    b: *const ListHead<T>,
+    a: *mut ListHead<T>,
+    b: *mut ListHead<T>,
     idx_a: usize,
     idx_b: usize,
-    stack: Vec<(*const ListHead<T>, usize)>,
+    stack: Vec<(*mut ListHead<T>, usize)>,
 }
 
 // Private functions
@@ -130,7 +130,7 @@ impl<'life, T> DoubleCursor<'life, T> {
     /// of the same list as `self.list`. The `idx` must correspond to the index of `new_head` in
     /// `self.list`.
     unsafe fn split_at(self, new_head: *mut ListHead<T>, idx: usize) -> CircularList<T> {
-        let head = self.list.head as *mut _;
+        let head = self.list.head;
         if head == new_head {
             return core::mem::take(self.list);
         }
@@ -161,7 +161,7 @@ impl<'life, T> DoubleCursor<'life, T> {
         unsafe {
             // SAFETY: Invariants (3) and (5) assert that `self.a` is a valid pointer to
             // a valid circular linked list
-            self.a = (*self.a).next;
+            self.a = (*self.a).next_mut_ptr();
         }
         self.idx_a = (self.idx_a + 1) % self.list.len();
     }
@@ -171,7 +171,7 @@ impl<'life, T> DoubleCursor<'life, T> {
         unsafe {
             // SAFETY: Invariants (3) and (5) assert that `self.b` is a valid pointer to
             // a valid circular linked list
-            self.b = (*self.b).next;
+            self.b = (*self.b).next_mut_ptr();
         }
         self.idx_b = (self.idx_b + 1) % self.list.len();
     }
@@ -181,7 +181,7 @@ impl<'life, T> DoubleCursor<'life, T> {
         unsafe {
             // SAFETY: Invariants (3) and (5) assert that `self.a` is a valid pointer to
             // a valid circular linked list
-            self.a = (*self.a).prev;
+            self.a = (*self.a).prev_mut_ptr();
         }
         let len = self.list.len();
         self.idx_a = (len + self.idx_a - 1) % len;
@@ -192,7 +192,7 @@ impl<'life, T> DoubleCursor<'life, T> {
         unsafe {
             // SAFETY: Invariants (3) and (5) assert that `self.b` is a valid pointer to
             // a valid circular linked list
-            self.b = (*self.b).prev;
+            self.b = (*self.b).prev_mut_ptr();
         }
         let len = self.list.len();
         self.idx_b = (len + self.idx_b - 1) % len;
@@ -283,7 +283,7 @@ impl<'life, T> DoubleCursor<'life, T> {
     /// # Note
     /// The `DoubleCursor` is consumed in the operation.
     pub fn split_at_a(self) -> CircularList<T> {
-        let a = self.a as *mut _;
+        let a = self.a;
         let idx_a = self.idx_a;
         unsafe {
             // SAFETY: `self.a` is valid and `self.idx_a` is the index of `self.a` in `self.list`
@@ -297,7 +297,7 @@ impl<'life, T> DoubleCursor<'life, T> {
     /// # Note
     /// The `DoubleCursor` is consumed in the operation.
     pub fn split_at_b(self) -> CircularList<T> {
-        let b = self.b as *mut _;
+        let b = self.b;
         let idx_b = self.idx_b;
         unsafe {
             // SAFETY: `self.b` is valid and `self.idx_b` is the index of `self.b` in `self.list`
@@ -312,15 +312,15 @@ impl<'life, T> DoubleCursor<'life, T> {
         unsafe {
             // SAFETY: Invariant (5) asserts that `self.a` and `self.b` are valid. Invariant (3)
             // asserts that it is part of a valid circular linked list.
-            if (*self.a).prev == self.b || self.a == self.b {
+            if (*self.a).prev_ptr() == self.b || self.a == self.b {
                 // `self.a` is already in the good place.
                 return;
             }
             if self.a == self.list.head {
                 // keep the head in its place
-                self.list.head = (*self.a).next;
+                self.list.head = (*self.a).next_mut_ptr();
             }
-            ListHead::<T>::move_entry(self.a as *mut _, self.b as *mut _, (*self.b).next as *mut _);
+            ListHead::<T>::move_entry(self.a, self.b, (*self.b).next_mut_ptr());
         }
     }
 
@@ -330,19 +330,19 @@ impl<'life, T> DoubleCursor<'life, T> {
         unsafe {
             // SAFETY: Invariant (5) asserts that `self.a` and `self.b` are valid. Invariant (3)
             // asserts that it is part of a valid circular linked list.
-            if (*self.a).prev == self.b || self.a == self.b {
+            if (*self.a).prev_ptr() == self.b || self.a == self.b {
                 // `self.b` is already in the good place.
                 return;
             }
             if self.b == self.list.head {
                 // keep the head in its place
-                self.list.head = (*self.b).next;
+                self.list.head = (*self.b).next_mut_ptr();
             }
             if self.a == self.list.head {
                 // Inserting before the head means not at the end of the list
                 self.list.head = self.b;
             }
-            ListHead::<T>::move_entry(self.b as *mut _, (*self.a).prev as *mut _, self.a as *mut _);
+            ListHead::<T>::move_entry(self.b, (*self.a).prev_mut_ptr(), self.a);
         }
     }
 
@@ -352,7 +352,7 @@ impl<'life, T> DoubleCursor<'life, T> {
         unsafe {
             // SAFETY: According to invariant (5), `self.a` is a valid pointer. Moreover, `self.a`
             // points to a member of `self.list`.
-            self.list.insert_after(val, self.a as *mut _)
+            self.list.insert_after(val, self.a)
         }
         // Preserving invariant (5)
         if self.idx_a < self.idx_b {
@@ -366,7 +366,7 @@ impl<'life, T> DoubleCursor<'life, T> {
         unsafe {
             // SAFETY: According to invariant (5), `self.b` is a valid pointer. Moreover, `self.b`
             // points to a member of `self.list`.
-            self.list.insert_after(val, self.b as *mut _)
+            self.list.insert_after(val, self.b)
         }
         // Preserving invariant (5)
         if self.idx_b < self.idx_a {
@@ -393,7 +393,7 @@ impl<'life, T> CursorMut<'life, T> {
             // Preserving the invariant (6)
             panic!("Cannot build a `Cursor` from an empty list.");
         }
-        let current = list.head as *mut _;
+        let current = list.head;
         Self { list, current }
     }
 
@@ -404,7 +404,7 @@ impl<'life, T> CursorMut<'life, T> {
 
     /// Returns to its initial position (the head of the list).
     pub fn reset(&mut self) {
-        self.current = self.list.head as *mut _;
+        self.current = self.list.head;
     }
 
     /// Moves the cursor to the next element of the `CircularList`.
@@ -412,7 +412,7 @@ impl<'life, T> CursorMut<'life, T> {
         unsafe {
             // SAFETY: Invariants (3) and (6) assert that `self.current` is a valid pointer to
             // a valid circular linked list
-            self.current = (*self.current).next as *mut _;
+            self.current = (*self.current).next_mut_ptr();
         }
     }
 
@@ -421,7 +421,7 @@ impl<'life, T> CursorMut<'life, T> {
         unsafe {
             // SAFETY: Invariants (3) and (6) assert that `self.current` is a valid pointer to
             // a valid circular linked list
-            self.current = (*self.current).prev as *mut _;
+            self.current = (*self.current).prev_mut_ptr();
         }
     }
 
@@ -446,7 +446,7 @@ impl<'life, T> CursorMut<'life, T> {
             let val = self.list.remove().unwrap();
 
             // Preserve invariant (6).
-            self.current = self.list.head as *mut _;
+            self.current = self.list.head;
 
             val
         } else {
@@ -455,7 +455,7 @@ impl<'life, T> CursorMut<'life, T> {
                 let (next, val) = ListHead::del_entry(self.current);
 
                 // Preserve invariant (6).
-                self.current = next as *mut _;
+                self.current = next;
 
                 // Preserving invariant (2).
                 self.list.length -= 1;
@@ -489,7 +489,7 @@ impl<'life, T> CursorMut<'life, T> {
         unsafe {
             // SAFETY: Invariant (6) asserts that `current` is a valid pointer to a `ListHead<T>`
             // and it is part of the list.
-            self.list.insert_after(val, (*self.current).prev as *mut _);
+            self.list.insert_after(val, (*self.current).prev_mut_ptr());
         }
     }
 

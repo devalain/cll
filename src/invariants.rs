@@ -23,5 +23,5 @@ pub const INVARIANT_4: () = ();
 /// Within a [`DoubleCursor<T>`](`crate::DoubleCursor<T>`):
 /// * `a` and `b` are always valid pointers
 /// * The `idx_a` and `idx_b` are always equal to the number of (forward) steps between the
-/// head and the position of `a` and `b` respectively
+///   head and the position of `a` and `b` respectively
 pub const INVARIANT_5: () = ();

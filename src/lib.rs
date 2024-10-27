@@ -34,7 +34,6 @@ pub use head::cursor::{Cursor, CursorMut, DoubleCursor};
 
 use {
     crate::head::{Iter, IterMut, ListHead},
-    alloc::boxed::Box,
     core::{iter::FromIterator, ops::Not, ptr},
 };
 
@@ -72,7 +71,7 @@ pub struct CircularList<T> {
     /// The `head` field is a pointer to a `ListHead<T>`. The code try to preserve the following
     /// invariant (1): If the list is empty, it is null, otherwise it is a valid pointer that one
     /// can safely dereference. (See also [`INVARIANT_1`](`crate::invariants::INVARIANT_1`))
-    head: *const ListHead<T>,
+    head: *mut ListHead<T>,
 
     /// Obviously the number of elements in the list.
     /// Invariant (2): It is updated each time an element is added to the list or removed from it.
@@ -89,13 +88,13 @@ impl<T> CircularList<T> {
     /// The caller must assert that `element` is a valid pointer to a `ListHead` that is a
     /// member of `self`.
     pub(crate) unsafe fn insert_after(&mut self, val: T, element: *mut ListHead<T>) {
-        let new = Box::into_raw(ListHead::<T>::new(val));
+        let new = ListHead::<T>::new(val);
 
         unsafe {
             // SAFETY: The caller promises us that `element` is valid and
             // belongs to `self`. The `new` pointer is obviously valid
             // since it was returned form `Box::into_raw`.
-            (*element).add_after(new);
+            ListHead::add_after(element, new);
         }
 
         // Preserving invariant (2)
@@ -124,7 +123,7 @@ impl<T> CircularList<T> {
     /// assert_eq!(my_list.pop(), Some("Hello"))
     ///
     pub fn add(&mut self, val: T) {
-        let new = Box::into_raw(ListHead::<T>::new(val));
+        let new = ListHead::<T>::new(val);
 
         // If `self.head` is null (which means `self.length == 0` by (2)) then
         // it is assigned to a valid pointer to the `new` element,
@@ -133,12 +132,11 @@ impl<T> CircularList<T> {
             debug_assert_eq!(self.length, 0);
             self.head = new;
         } else {
-            let head = self.head as *mut ListHead<T>;
             unsafe {
                 // SAFETY: At this point, `head` must be valid since it was
                 // initialized to `new` if it was null. The `new` pointer is
                 // obviously valid since it was returned form `Box::into_raw`.
-                (*head).add(new);
+                ListHead::add(self.head, new);
             }
         }
 
@@ -167,12 +165,19 @@ impl<T> CircularList<T> {
         if self.head.is_null() {
             debug_assert_eq!(self.length, 0);
             None
+        } else if self.length == 1 {
+            let value = unsafe { ListHead::into_value(self.head) };
+            self.head = ptr::null_mut();
+
+            // Preserving invariant (2)
+            self.length -= 1;
+            Some(value)
         } else {
             let (new_head, old_val) = unsafe {
                 // SAFETY: Since `head` is not null, it must be valid as we try to preserve (1).
                 // Furthermore, it must be true that it has pointers to its next and previous
                 // elements because of the invariant (3) (see the `head` module).
-                ListHead::<T>::del_entry(self.head as *mut _)
+                ListHead::<T>::del_entry(self.head)
             };
             // If there is a next element, it is the new head, otherwise `self.head` is null.
             // Invariant (1) is preserved since de `ListHead::del` function returns either null
@@ -202,7 +207,7 @@ impl<T> CircularList<T> {
                 // SAFETY: Since `head` is not null, it must be valid because of (1).
                 // Furthermore, it must be true that it has pointers to its next and previous
                 // elements because of invariant (3).
-                ListHead::<T>::del_entry((*self.head).prev() as *mut _)
+                ListHead::<T>::del_entry((*self.head).prev_mut_ptr())
             };
 
             // Preserving invariant (2)
@@ -230,31 +235,31 @@ impl<T> CircularList<T> {
 
         let from = i.min(j);
         let count = i.max(j) - from;
-        let mut item1 = self.head as *mut ListHead<T>;
+        let mut item1 = self.head;
         for _ in 0..from {
             item1 = unsafe {
                 // SAFETY: The invariant (3) asserts that the pointer to the next element
                 // of a `ListHead` is always valid.
-                (*item1).next()
-            } as *mut _;
+                (*item1).next_mut_ptr()
+            };
         }
         let mut item2 = item1;
         for _ in 0..count {
             item2 = unsafe {
                 // SAFETY: The invariant (3) asserts that the pointer to the next element
                 // of a `ListHead` is always valid.
-                (*item2).next()
-            } as *mut _;
+                (*item2).next_mut_ptr()
+            };
         }
         unsafe {
             // SAFETY: According to invariant (3), `item1` and `item2` are part of a valid circular
             // linked list.
             ListHead::<T>::swap(item1, item2);
         }
-        if item1 as *const _ == self.head {
-            self.head = item2 as *const _;
-        } else if item2 as *const _ == self.head {
-            self.head = item1 as *const _;
+        if item1 == self.head {
+            self.head = item2;
+        } else if item2 == self.head {
+            self.head = item1;
         }
     }
 
@@ -263,14 +268,12 @@ impl<T> CircularList<T> {
         if self.head.is_null() {
             self.head = other.head;
         } else if !other.head.is_null() {
-            let other_head = other.head as *mut ListHead<T>;
-            let head = self.head as *mut ListHead<T>;
             unsafe {
                 // SAFETY: `head` is not null, so it must be a valid pointer because of (1)
                 // `other_head` is not null, so it must be a valid pointer for the same reason.
                 // `head` is obviously not in the same list as `other_head` since `head` comes from
                 // an exclusive reference of `Self` and `other_head` comes from an owned `Self`.
-                ListHead::<T>::add_list(other_head, head);
+                ListHead::<T>::add_list(other.head, self.head);
             }
         }
 
@@ -278,7 +281,7 @@ impl<T> CircularList<T> {
         self.length += other.length;
 
         // `other` must be in valid state when being dropped.
-        other.head = ptr::null();
+        other.head = ptr::null_mut();
         other.length = 0;
     }
 
@@ -291,13 +294,13 @@ impl<T> CircularList<T> {
         if self.is_empty() {
             self.append(other);
         } else if other.is_empty().not() {
-            let mut s = self.head as *mut ListHead<T>;
+            let mut s = self.head;
             let mut s_head = s;
-            let mut o = other.head as *mut ListHead<T>;
+            let mut o = other.head;
             unsafe {
-                let mut s_next = (*s).next() as *mut ListHead<T>;
-                let mut o_next = (*o).next() as *mut ListHead<T>;
-                let o_end = (*o).prev() as *mut ListHead<T>;
+                let mut s_next = (*s).next_mut_ptr();
+                let mut o_next = (*o).next_mut_ptr();
+                let o_end = (*o).prev_mut_ptr();
                 if *o < *s {
                     self.head = o;
                     s_head = o;
@@ -308,16 +311,16 @@ impl<T> CircularList<T> {
                         ListHead::add_list(o, s_head);
                         break;
                     } else if *o < *s {
-                        ListHead::move_entry(o, (*s).prev() as *mut _, s);
+                        ListHead::move_entry(o, (*s).prev_mut_ptr(), s);
                         if o == o_end {
                             // We reached the last element of `other`
                             break;
                         }
                         o = o_next;
-                        o_next = (*o).next() as *mut ListHead<T>;
+                        o_next = (*o).next_mut_ptr();
                     } else {
                         s = s_next;
-                        s_next = (*s).next() as *mut ListHead<T>;
+                        s_next = (*s).next_mut_ptr();
                         reached_end_of_s = s == s_head;
                     }
                 }
@@ -327,7 +330,7 @@ impl<T> CircularList<T> {
             self.length += other.length;
 
             // `other` must be in valid state when being dropped.
-            other.head = ptr::null();
+            other.head = ptr::null_mut();
             other.length = 0;
         }
     }
@@ -360,7 +363,7 @@ impl<T> CircularList<T> {
                 // SAFETY: Since the list is non empty and according to invariants (1) and (3),
                 // `head` is a valid pointer to a valid circular linked list. So it must be true
                 // that its next element is also valid.
-                (*self.head).next()
+                (*self.head).next_mut_ptr()
             };
         }
     }
@@ -378,7 +381,7 @@ impl<T> CircularList<T> {
                 // SAFETY: Since the list is non empty and according to invariants (1) and (3),
                 // `head` is a valid pointer to a valid circular linked list. So it must be true
                 // that its next element is also valid.
-                (*self.head).next()
+                (*self.head).next_mut_ptr()
             };
         }
     }
@@ -417,7 +420,7 @@ impl<T> CircularList<T> {
                 // SAFETY: Since the list is non empty and according to invariants (1) and (3),
                 // `head` is a valid pointer to a valid circular linked list. So it must be true
                 // that its previous element is also valid.
-                (*self.head).prev()
+                (*self.head).prev_mut_ptr()
             };
         }
     }
@@ -473,7 +476,7 @@ impl<T> CircularList<T> {
 impl<T> Default for CircularList<T> {
     fn default() -> Self {
         Self {
-            head: ptr::null(),
+            head: ptr::null_mut(),
             length: 0,
         }
     }

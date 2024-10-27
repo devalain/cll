@@ -1,11 +1,43 @@
-use {crate::CircularList, alloc::boxed::Box, core::ptr};
+use {
+    crate::CircularList,
+    alloc::boxed::Box,
+    core::{cell::UnsafeCell, ptr},
+};
 
 pub mod cursor;
 
+struct Pointers<T> {
+    next: *mut ListHead<T>,
+    prev: *mut ListHead<T>,
+}
+impl<T> Default for Pointers<T> {
+    fn default() -> Self {
+        Self {
+            next: ptr::null_mut(),
+            prev: ptr::null_mut(),
+        }
+    }
+}
+impl<T> Pointers<T> {
+    fn set(&mut self, next: *mut ListHead<T>, prev: *mut ListHead<T>) {
+        self.next = next;
+        self.prev = prev;
+    }
+    fn set_both(&mut self, link: *mut ListHead<T>) {
+        self.next = link;
+        self.prev = link;
+    }
+    fn set_next(&mut self, link: *mut ListHead<T>) {
+        self.next = link;
+    }
+    fn set_prev(&mut self, link: *mut ListHead<T>) {
+        self.prev = link;
+    }
+}
+
 /// List element for a doubly linked list.
 pub struct ListHead<T> {
-    next: *const ListHead<T>,
-    prev: *const ListHead<T>,
+    pointers: UnsafeCell<Pointers<T>>,
     value: T,
 }
 
@@ -26,28 +58,50 @@ impl<T> ListHead<T> {
     ///      │   │
     ///      └───┘
     /// ```
-    pub fn new(val: T) -> Box<Self> {
+    pub fn new(val: T) -> *mut Self {
         let mut new = Box::new(Self {
-            next: ptr::null(),
-            prev: ptr::null(),
+            pointers: Default::default(),
             value: val,
         });
 
         // Preserving invariant (3)
-        new.next = &*new;
-        new.prev = &*new;
+        unsafe {
+            let ptr = &raw mut *new;
+            new.pointers_mut().set_both(ptr);
+        }
 
-        new
+        Box::into_raw(new)
     }
 
-    /// Gets a pointer to the next element.
-    pub fn next(&self) -> *const Self {
-        self.next
+    unsafe fn pointers(&self) -> &Pointers<T> {
+        unsafe { &*self.pointers.get() }
+    }
+
+    unsafe fn pointers_mut<'a>(&self) -> &'a mut Pointers<T> {
+        unsafe { &mut *self.pointers.get() }
+    }
+
+    pub fn next(&self) -> &Self {
+        unsafe { &*self.pointers().next }
+    }
+
+    /// Gets a mutable pointer to the next element.
+    pub fn next_mut_ptr(&self) -> *mut Self {
+        unsafe { self.pointers_mut().next }
+    }
+
+    pub fn next_ptr(&self) -> *const Self {
+        unsafe { self.pointers().next }
     }
 
     /// Gets a pointer to the previous element.
-    pub fn prev(&self) -> *const Self {
-        self.prev
+    pub fn prev_mut_ptr(&self) -> *mut Self {
+        unsafe { self.pointers_mut().prev }
+    }
+
+    /// Gets a pointer to the previous element.
+    pub fn prev_ptr(&self) -> *const Self {
+        unsafe { self.pointers().prev }
     }
 
     /// Gets a shared reference to the value of the list head.
@@ -72,18 +126,26 @@ impl<T> ListHead<T> {
     /// # Safety
     /// * `next`, `new` and `prev` must be valid pointers
     /// * `next` should be the next of `prev` and `prev` should be the
-    /// previous of `next`
+    ///   previous of `next`
     /// * `new` must be disconnected from its old place (i.e. with
-    /// `__del` or `__replace`) before
-    /// calling this function otherwise it would break
-    /// [`INVARIANT_3`](`crate::invariants::INVARIANT_3`).
+    ///   `__del` or `__replace`) before calling this function otherwise it
+    ///   would break [`INVARIANT_3`](`crate::invariants::INVARIANT_3`).
     unsafe fn __add(new: *mut Self, prev: *mut Self, next: *mut Self) {
+        if prev == next {
+            unsafe {
+                // SAFETY: See the caller contract.
+                (*next).pointers_mut().set_both(new);
+            }
+        } else {
+            unsafe {
+                // SAFETY: See the caller contract.
+                (*next).pointers_mut().set_prev(new);
+                (*prev).pointers_mut().set_next(new);
+            }
+        }
         unsafe {
             // SAFETY: See the caller contract.
-            (*next).prev = new;
-            (*new).next = next;
-            (*new).prev = prev;
-            (*prev).next = new;
+            (*new).pointers_mut().set(next, prev);
         }
     }
 
@@ -102,14 +164,13 @@ impl<T> ListHead<T> {
     /// # Safety
     /// * `next` and `prev` must be valid pointers.
     /// * the element(s) between `next` and `prev` must be dropped or
-    /// connected somewhere else
-    /// after calling this function in order to preserve
-    /// [`INVARIANT_3`](`crate::invariants::INVARIANT_3`).
+    ///   connected somewhere else after calling this function in order to
+    ///   preserve [`INVARIANT_3`](`crate::invariants::INVARIANT_3`).
     unsafe fn __del(prev: *mut Self, next: *mut Self) {
         unsafe {
             // SAFETY: See the caller contract.
-            (*next).prev = prev;
-            (*prev).next = next;
+            (*next).pointers_mut().set_prev(prev);
+            (*prev).pointers_mut().set_next(next);
         }
     }
 
@@ -119,34 +180,34 @@ impl<T> ListHead<T> {
     /// # Safety
     /// `to_del` must be a valid pointer to a `ListHead` with valid pointers to its next
     /// and previous elements.
-    pub unsafe fn del_entry(to_del: *mut Self) -> (*const Self, T) {
-        let mut next = (*to_del).next;
-        if to_del as *const _ != next {
-            unsafe {
-                // `to_del` is valid as promised by the caller.
-                // `(*to_del).prev` and `(*to_del).next` should be valid according to invariant (3).
-                Self::__del((*to_del).prev as *mut _, (*to_del).next as *mut _);
-            }
-        } else {
-            next = ptr::null();
-        }
+    pub unsafe fn del_entry(to_del: *mut Self) -> (*mut Self, T) {
+        unsafe {
+            // `to_del.prev` and `to_del.next` should be valid according to invariant (3).
+            let prev = (*to_del).prev_mut_ptr();
+            let next = (*to_del).next_mut_ptr();
 
-        // `to_del` has to be dropped in order to preserve invariant (3).
-        let to_del = Box::from_raw(to_del);
-        (next, to_del.value)
+            Self::__del(prev, next);
+
+            // SAFETY `to_del` is valid as promised by the caller.
+            // `to_del` has to be dropped in order to preserve invariant (3).
+            let to_del = Box::from_raw(to_del);
+
+            (next, to_del.value)
+        }
     }
 
     /// Inserts an element before this one.
     ///
     /// # Safety
     /// `new` must be a valid pointer to a `ListHead` a must not be connected to other `ListHead`s.
-    pub unsafe fn add(&mut self, new: *mut Self) {
+    /// `this` must be a valid pointer to a `ListHead`.
+    pub unsafe fn add(this: *mut Self, new: *mut Self) {
         unsafe {
-            // SAFETY: Since `self` is a borrow checked reference, it must be true that
-            // it is a valid pointer. The caller promises us that `new` is valid.
-            // As for the `prev` parameter, it is the same as `self` or
+            // SAFETY: `this` is is a valid pointer as claimed by the caller.
+            // The caller promises us that `new` is valid.
+            // As for the `prev` parameter, it is the same as `this` or
             // another valid pointer according to invariant (3).
-            Self::__add(new, self.prev as *mut _, self);
+            Self::__add(new, (*this).prev_mut_ptr(), this);
         }
     }
 
@@ -154,13 +215,13 @@ impl<T> ListHead<T> {
     ///
     /// # Safety
     /// `new` must be a valid pointer to a `ListHead` a must not be connected to other `ListHead`s.
-    pub unsafe fn add_after(&mut self, new: *mut Self) {
+    pub unsafe fn add_after(this: *mut Self, new: *mut Self) {
         unsafe {
-            // SAFETY: Since `self` is a borrow checked reference, it must be true that
-            // it is a valid pointer. The caller promises us that `new` is valid.
+            // SAFETY: `this` is claimed to be valid by the caller.
+            // The caller promises us that `new` is valid.
             // As for the `prev` parameter, it is the same as `self` or
             // another valid pointer according to invariant (3).
-            Self::__add(new, self, self.next as *mut _);
+            Self::__add(new, this, (*this).next_mut_ptr());
         }
     }
 
@@ -192,16 +253,21 @@ impl<T> ListHead<T> {
     /// # Safety
     /// * `old` and `new` must be valid pointers
     /// * `old` has to be dropped or connected somewhere else after calling this function in
-    /// order to preserve [`INVARIANT_3`](`crate::invariants::INVARIANT_3`).
+    ///   order to preserve [`INVARIANT_3`](`crate::invariants::INVARIANT_3`).
     unsafe fn __replace(old: *mut Self, new: *mut Self) {
+        if old == new {
+            return;
+        }
         unsafe {
             // SAFETY: The caller garantee that `old` and
             // `new` are valid pointers and that `old` will
             // be dropped or connected somewhere else.
-            (*new).next = (*old).next;
-            (*((*new).next as *mut Self)).prev = new;
-            (*new).prev = (*old).prev;
-            (*((*new).prev as *mut Self)).next = new;
+            (*(*old).next_mut_ptr()).pointers_mut().set_prev(new);
+            (*(*old).prev_mut_ptr()).pointers_mut().set_next(new);
+            (*new)
+                .pointers_mut()
+                .set((*old).next_mut_ptr(), (*old).prev_mut_ptr());
+            (*old).pointers_mut().set_both(ptr::null_mut());
         }
     }
 
@@ -214,8 +280,8 @@ impl<T> ListHead<T> {
         unsafe {
             // `entry2` is valid as promised by the caller.
             // `(*entry2).prev` and `(*entry2).next` should be valid according to invariant (3)
-            let mut pos = (*entry2).prev;
-            Self::__del((*entry2).prev as *mut _, (*entry2).next as *mut _);
+            let mut pos = (*entry2).prev_mut_ptr();
+            Self::__del(pos, (*entry2).next_mut_ptr());
 
             // `entry1` is valid as promised by the caller.
             // `entry2` is connected in place of `entry1` which preserve invariant (3).
@@ -228,7 +294,7 @@ impl<T> ListHead<T> {
 
             // `pos` and `(*pos).next` are valid according to invariant (3) and `entry1` was just
             // disconnected from its old place.
-            Self::__add(entry1 as *mut _, pos as *mut _, (*pos).next as *mut _);
+            Self::__add(entry1, pos, (*pos).next_mut_ptr());
         }
     }
 
@@ -240,7 +306,7 @@ impl<T> ListHead<T> {
     pub unsafe fn move_entry(entry: *mut Self, prev: *mut Self, next: *mut Self) {
         unsafe {
             // `(*entry).prev` and `(*entry).next` should be valid according to invariant (3)
-            Self::__del((*entry).prev as *mut _, (*entry).next as *mut _);
+            Self::__del((*entry).prev_mut_ptr(), (*entry).next_mut_ptr());
             // We know `entry` is valid and `next` and `prev` are consecutive (because of course the
             // caller is cautious)
             Self::__add(entry, prev, next);
@@ -253,13 +319,13 @@ impl<T> ListHead<T> {
     /// * `list` must be a valid pointer and be part of a valid circular list
     /// * Idem for `next`
     /// * `list` **must not** be an element of the same circular list as `next` without defining a
-    /// new head for the orphaned list, otherwise it would cause a memory leak.
+    ///   new head for the orphaned list, otherwise it would cause a memory leak.
     pub unsafe fn add_list(list: *mut Self, next: *mut Self) {
         unsafe {
             // `last_of_list` should be valid according to invariant (3)
-            let last_of_list = (*list).prev as *mut Self;
+            let last_of_list = (*list).prev_mut_ptr();
             // idem
-            let prev = (*next).prev as *mut Self;
+            let prev = (*next).prev_mut_ptr();
 
             // Preserving invariant (3): as soon as `list` is part of a valid circular list as well as
             // `next`, the connections made here will create 1 or 2 valid circular list(s).
@@ -280,14 +346,19 @@ impl<T> ListHead<T> {
     pub unsafe fn split(head: *mut Self, new_head: *mut Self) {
         unsafe {
             // The last element of the list where `new_head` is the head.
-            let new_tail = (*head).prev as *mut _;
+            let new_tail = (*head).prev_mut_ptr();
 
             // close the list where `head` is the head
-            Self::__del((*new_head).prev as *mut Self, head);
+            Self::__del((*new_head).prev_mut_ptr(), head);
 
             // close the list where `new_head` is the head
             Self::__del(new_tail, new_head);
         }
+    }
+
+    pub unsafe fn into_value(this: *mut Self) -> T {
+        let this = unsafe { Box::from_raw(this) };
+        this.value
     }
 }
 
@@ -305,7 +376,7 @@ impl<'life, T> Iterator for Iter<'life, T> {
         // Plus, the list is circular so next should always be non null if the list is non empty.
         let (current, next) = unsafe {
             let r = &*self.next;
-            (&r.value, r.next)
+            (r.value(), r.next())
         };
         self.next = next;
         Some(current)
@@ -335,7 +406,8 @@ impl<'life, T> Iterator for IterMut<'life, T> {
         // Plus, the list is circular so next should always be non null if the list is non empty.
         let (current, next) = unsafe {
             let r = &mut *self.next;
-            (&mut r.value, r.next as *mut _)
+            let next = r.next_mut_ptr();
+            (r.value_mut(), next)
         };
         self.next = next;
         Some(current)
